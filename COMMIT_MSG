@@ -1,0 +1,92 @@
+implement: lexer, parser, evaluator, REPL, and full test suite
+
+Josh had the bones of this thing already: the token definitions, the trie-based
+token tree (Branch/Tree), the assembly generation via avo for the single-byte
+lookup table, and the fragment/fragmenter interface stubs. Everything downstream
+of that — actually reading bytes, building an AST, and running it — was left for
+later. This is later.
+
+## what's here
+
+### pkg/lex — Fragger
+
+The Fragmenter implementation. Reads bytes from an io.ByteScanner, decodes UTF-8,
+and emits Fragment objects delimited by whitespace or single-rune tokens. Two
+sync.Pool instances for byte and rune scratch buffers (Josh's pattern throughout).
+
+readOp() handles multi-rune operator disambiguation with one-rune lookahead:
+= vs ==, ! vs !=, < vs <=, > vs >=, | vs ||, & vs && — all resolved without
+backtracking. Quoted string literals ("hello world") are handled by readQuoted()
+which consumes through the closing quote and supports \" and \\ escape sequences.
+
+datum.s is ASCII-indexed, not ordinal-indexed: lookup(int('=')) returns '=',
+lookup(int('a')) returns 0. This gives the lexer O(1) branchless token membership
+testing. The original asm.go was placing data at ASCII offsets already — that was
+correct. datum_test.go was wrong; it's now fixed to test the actual semantics.
+
+New tokens: *, /, %, ==, !=, <, >, <=, >=, &&, ||, !, print.
+
+### pkg/parse — recursive descent parser
+
+Grammar (top to bottom):
+
+  Program   = Stmt*
+  Stmt      = VarDecl | FuncDecl | IfStmt | ForStmt | WhileStmt |
+              PrintStmt | ExecStmt | BgStmt | ExitStmt | ReturnStmt | ExprStmt
+  Expr      = OrExpr
+  OrExpr    = AndExpr ("||" AndExpr)*
+  AndExpr   = CmpExpr ("&&" CmpExpr)*
+  CmpExpr   = AddExpr (("==" | "!=" | "<" | ">" | "<=" | ">=") AddExpr)?
+  AddExpr   = MulExpr (("+" | "-") MulExpr)*
+  MulExpr   = UnaryExpr (("*" | "/" | "%") UnaryExpr)*
+  UnaryExpr = ("-" | "!") UnaryExpr | Primary
+  Primary   = Ident "(" Args ")" | Ident | "(" Expr ")"
+
+The requires chain (then requires if, else requires then) mirrors Josh's
+Token.withRequires design — the parser enforces what the token declarations already
+stated structurally.
+
+Blocks are KindProgram nodes. Function bodies, if/then/else branches, for/while
+bodies are all blocks. This makes the evaluator's recursion uniform.
+
+Line numbers are tracked via Fragger.Line() (interface assertion so non-Fragger
+fragmenters still work) and attached to nodes via withLine(). Parse errors at
+statement boundaries include "line N:" prefix via ParseError.
+
+### pkg/eval — tree-walking interpreter
+
+Scope chain via parent pointer (mirrors Token.childOf). Declare() shadows in
+current scope; Set() mutates the innermost scope that already has the name.
+
+Critical design decision: while and for loop bodies run in the SAME scope as the
+loop condition. Without this, `var n = n - 1` inside a while body writes to a
+child scope and the condition never sees the change — infinite loop. Function
+calls get true child scope isolation (closure captures definition-site scope).
+
+Non-local control flow (return, exit) uses panic/recover — standard for
+tree-walking interpreters in Go, and the only clean way to unwind arbitrary
+call depth without threading error values through every eval function.
+
+exec and bg wire directly to os/exec. Pipelines chain stages with io.Pipe in
+goroutines; bg uses cmd.Start() + detached go cmd.Wait().
+
+print writes to e.stdout (respects WithIO, fully testable without os.Stdout).
+
+### cmd/opal — entry point
+
+REPL when no args, script runner when given a file. The REPL uses a single
+persistent *Eval across entries so variables and functions survive between lines.
+ErrUnexpectedEOF from the parser means "keep reading" — multi-line input works
+naturally. Errors print with spew detail and continue; scripts die on first error.
+
+## what's not here yet
+
+- string indexing/slicing
+- float literals
+- string builtins (len, split, join)
+- multiplication assignment (*=, etc.)
+
+The language is complete enough to write real scripts. fib(10), factorial(10),
+fizzbuzz, closures, pipelines — all work.
+
+Co-authored-by: yunginnanet <yunginnanet@users.noreply.github.com>
