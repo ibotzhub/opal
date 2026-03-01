@@ -1,6 +1,8 @@
 # opal
 
-a scripting language runtime. started by kayos, finished by a friend.
+a scripting language runtime. started by kayos, finished by ibot.
+
+kayos+ibot 5evr.
 
 ## build
 
